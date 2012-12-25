@@ -11,6 +11,7 @@ import signal
 import matplotlib.pyplot as plt
 import sys
 import tarfile
+from nltk.model import NgramModel
 import matplotlib.image as mpimg
 
 class Command(object):
@@ -757,7 +758,8 @@ def setup_repair(folder_name, hw_num,buggy_prog=''):
     #remove previous *.c files
     purge(os.path.join(TOP,folder_name,'repair'),r'.*\.c')
     #select buggy file ====
-    bug_dir = os.path.join(TOP,folder_name,'hash_removed','buggy')
+    bug_dir = os.path.join(TOP,folder_name,'repair','real_bugs')
+    #bug_dir = os.path.join(TOP,folder_name,'hash_removed','buggy')
     if buggy_prog == '':
         assert os.path.exists(bug_dir)
         assert os.path.exists(os.path.join(TOP,folder_name,'repair'))
@@ -794,6 +796,11 @@ def run_extraction(repair_folder,original_prog):
     """
     repair_folder - path to the repair folder
     original_prog - path to the program under test
+
+    Moves mutants from the repair folder to the mutant folder.
+    Process the mutants
+    Extract the lines added by the mutants
+    Extract lines from correct folder.
     """
     print 'RUN EXTRACTION'
     assert 'mutants' in os.listdir(repair_folder)
@@ -923,29 +930,6 @@ def run_analysis(prog_folder,lines_folder,model):
                plotname+'.tar')
     
 
-##def run_entire(prog_name,hw_num,buggy_prog=''):
-##    """
-##    Runs the entire flow from extraction to repair to analysis
-##    """
-##    #folder_name is the prog_name without the .c extension
-##    if prog_name.find('.') < 0:
-##        folder_name = prog_name
-##        prog_name = prog_name +'.c'
-##    else:
-##        folder_name = prog_name.split('.')[0]
-##    partition(prog_name,hw_num)
-##    create_lm(os.path.join(TOP,folder_name,'processed','correct'),
-##              os.path.join(TOP,folder_name,'ngram'),
-##              prog_name)
-##    orig_prog = setup_repair(folder_name,hw_num)
-##    run_repair(os.path.join(TOP,folder_name,'repair'))
-##    #if the repair program is found, run the extraction and analysis
-##    if 'repair.c' in os.listdir(os.path.join(TOP,folder_name,'repair')):
-##        run_extraction(os.path.join(TOP,folder_name,'repair'),
-##                       os.path.join(TOP,folder_name,'repair',orig_prog))
-##        run_analysis(os.path.join(TOP,folder_name,'repair','lines_added'),
-##                     os.path.join(TOP,folder_name,'ngram',folder_name+'.arpa'))
-
 def phase1(prog_name,hw_num):
     """
     The first phase where we gather all the programs, filter them, and create a language model
@@ -981,6 +965,9 @@ def phase2(prog_name, hw_num,buggy=''):
 
 def n_runs(prog_name, hw_num,buggy='',num_runs=2):
     """
+    prog_name - name of the program, without the .c extension
+    hw_num - homework number
+    buggy - the buggy file
     This is a generalization of phase2. Instead of running repair just once, we run it num_runs times.
     After all the repairs are run, we gather the entropy values and create boxplots of the mutant and repair
     entropys. Save the plot and write the entropy values to a file.
@@ -993,16 +980,18 @@ def n_runs(prog_name, hw_num,buggy='',num_runs=2):
     
     repair_count = 0
     itr = 0
+    tol = 3
     lines_folder = os.path.join(TOP,folder_name,'repair','lines_added')
-    model = os.path.join(TOP,folder_name,'ngram',folder_name+'.arpa')
+    #model = os.path.join(TOP,folder_name,'ngram',folder_name+'.arpa') #deprecated
+    ngram_model = create_model(os.path.join(TOP,folder_name,'hash_removed','correct'))
     #keep track of the entropy values
     all_mutant = []
     all_correct = []
     #keep running repair on the same buggy file, until we've reach the desired number of repaired runs
     while repair_count < num_runs:
         print 'REPAIR #%i, TRIAL #%i'%(repair_count,itr)
-        if repair_count == 0 and itr > 5:
-            print '!! Have not found repair within first 5 iterations, exiting'
+        if (itr+1)/(repair_count+1)>= tol:
+            print '!! Iteration to repair count ratio is greater than %d, exiting'%(tol)
             return
         buggy_prog = setup_repair(folder_name,hw_num,buggy)
         run_repair(os.path.join(TOP,folder_name,'repair'))
@@ -1010,10 +999,12 @@ def n_runs(prog_name, hw_num,buggy='',num_runs=2):
             repair_count+=1
             run_extraction(os.path.join(TOP,folder_name,'repair'),
                        os.path.join(TOP,folder_name,'repair',buggy_prog))
-            mutant_ent = get_entropy(lines_folder,
-                               model)
-            correct_ent = get_repaired_entropy(os.path.join(lines_folder,'repair_lines_added.txt'),
-                                               model)
+            mutant_ent = entropy_dir(ngram_model,lines_folder)
+            correct_ent = entropy_file(ngram_model,os.path.join(lines_folder,'repair_lines_added.txt'))
+            #mutant_ent = get_entropy(lines_folder,
+            #                   model)
+            #correct_ent = get_repaired_entropy(os.path.join(lines_folder,'repair_lines_added.txt'),
+            #                                   model)
             all_mutant += mutant_ent
             all_correct.append(correct_ent)
         itr += 1
@@ -1057,6 +1048,58 @@ def n_runs(prog_name, hw_num,buggy='',num_runs=2):
     for ent in all_correct:
         fid.write('%s\n'%ent)
     fid.close()
+
+def token_file(filepath):
+    """
+    filepath - path to the file to retrieve tokens from
+
+    For each line splits the text and returns those tokens as a list
+    """
+    print 'NLTK TOKENS: %s'%filepath
+    tokens = []
+    f = open(filepath,'r')
+    for line in f.readlines():
+        tokens += line.split()
+    return tokens
+
+def token_dir(directory):
+    tokens = []
+    progs = glob.glob(os.path.join(directory,'*.c'))
+    for prog in progs:
+        print prog
+        tokens += token_file(prog)
+    return tokens
+
+def entropy_dir(model, directory):
+    entropies = []
+    # all mutants end in .txt
+    mutants = glob.glob(os.path.join(directory,'*.txt'))
+    for mutant in mutants:
+        print mutant
+        try:
+            entropies.append(entropy_file(model,mutant))
+        except:
+            print 'error in',mutant
+    return entropies
+
+def entropy_file(model, filepath):
+    """
+    Returns the entropy of the file in the context of model (an NgramModel)
+    Remeber that NgramModel.entropy() takes in a list of tokens
+    """
+    print 'NLTK ENTROPY: %s' %filepath
+    tokens = token_file(filepath)
+    return model.entropy(tokens)
+
+def create_model(directory,n=3):
+    """
+    directory - path to the corpus folder
+    Creates an ngram model from the files in a directory
+    """
+    print 'CREATE NLTK MODEL from %s'%directory
+    #est = lambda fdist,bins: GoodTuringProbDist(fdist) 
+    tokens = token_dir(directory)
+    return NgramModel(n,tokens)
 
 def compile_images(img_dir,extension='png'):
     """
@@ -1103,12 +1146,18 @@ def compile_images(img_dir,extension='png'):
 #phase1('makepalin',7)
 #n_runs('makepalin',7,'fyquader_makepalin_bar.cil.c',25)
 
-os.chdir(os.path.join(TOP,'square_root','hash_removed','buggy'))
-buggys = glob.glob('*.c')
-random.shuffle(buggys)
-print buggys
-for bug in buggys:
-    n_runs('square_root',4,bug,25)
+##os.chdir(os.path.join(TOP,'top3','hash_removed','buggy'))
+##buggys = glob.glob('*.c')
+##random.shuffle(buggys)
+##print buggys
+##for bug in buggys:
+##    n_runs('top3',6,bug,25)
+
+n_runs('square_root',4,'abagana_square_root_bar.cil.c')
+#phase1('top3',6)
+#create_lm(os.path.join(TOP,'top3','hash_removed','correct'),
+#              os.path.join(TOP,'top3','ngram'),
+#              'top3')
 
 
 
